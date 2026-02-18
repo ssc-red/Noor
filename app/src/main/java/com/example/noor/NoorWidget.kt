@@ -37,24 +37,22 @@ import com.example.noor.ui.theme.DarkGrey
 
 class NoorWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
-        val sehri = prefs.getString("sehri", "04:30 AM") ?: "04:30 AM"
-        val iftar = prefs.getString("iftar", "06:45 PM") ?: "06:45 PM"
-        val nextEvent = prefs.getString("nextEvent", "Iftar") ?: "Iftar"
-        val nextTime = prefs.getString("nextTime", "06:45 PM") ?: "06:45 PM"
+        val noorPrefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
+        val themePrefs = context.getSharedPreferences("NoorTheme", Context.MODE_PRIVATE)
 
-        // Detect if system is in dark mode
-        val isDarkMode = isSystemInDarkMode(context)
+        val sehri = noorPrefs.getString("sehri", "04:30 AM") ?: "04:30 AM"
+        val iftar = noorPrefs.getString("iftar", "06:45 PM") ?: "06:45 PM"
+        val nextEvent = noorPrefs.getString("nextEvent", "Iftar") ?: "Iftar"
+        val nextTime = noorPrefs.getString("nextTime", "06:45 PM") ?: "06:45 PM"
+
+        // Read app's theme preference - defaults to dark mode (true)
+        val isDarkMode = themePrefs.getBoolean("darkMode", true)
 
         provideContent {
             WidgetContent(sehri, iftar, nextEvent, nextTime, isDarkMode)
         }
     }
 
-    private fun isSystemInDarkMode(context: Context): Boolean {
-        val nightModeFlags = context.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
-        return nightModeFlags == android.content.res.Configuration.UI_MODE_NIGHT_YES
-    }
 
     @Composable
     private fun WidgetContent(sehri: String, iftar: String, nextEvent: String, nextTime: String, isDarkMode: Boolean) {

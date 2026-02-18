@@ -341,7 +341,13 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
             horizontalArrangement = Arrangement.End
         ) {
             IconButton(
-                onClick = { onThemeChange(!isDarkMode) },
+                onClick = {
+                    onThemeChange(!isDarkMode)
+                    // Update widget when theme changes
+                    MainScope().launch {
+                        NoorWidget().updateAll(context)
+                    }
+                },
                 modifier = Modifier.size(50.dp)
             ) {
                 Icon(
