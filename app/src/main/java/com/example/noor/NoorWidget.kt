@@ -5,6 +5,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
+import androidx.glance.action.actionStartActivity
+import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.cornerRadius
@@ -67,7 +69,8 @@ class NoorWidget : GlanceAppWidget() {
                 .fillMaxSize()
                 .background(bgColor)
                 .cornerRadius(16.dp)
-                .padding(12.dp),
+                .padding(12.dp)
+                .clickable(actionStartActivity<MainActivity>()),
             verticalAlignment = Alignment.Top,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {

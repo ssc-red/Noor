@@ -11,7 +11,6 @@ import android.location.Location
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -22,6 +21,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.NightlightRound
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -43,7 +45,6 @@ import org.json.JSONObject
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -69,13 +70,45 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var prayerTimes by remember { mutableStateOf<List<PrayerTime>>(emptyList()) }
     var locationName by remember { mutableStateOf("Fetching location...") }
     var nextEvent by remember { mutableStateOf<PrayerTime?>(null) }
     var isLoading by remember { mutableStateOf(true) }
-    var countdownText by remember { mutableStateOf("") }
 
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+
+    fun updateWidget(times: List<PrayerTime>) {
+        val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
+        val saherTime = times.find { it.name.contains("Saher") }?.time ?: ""
+        val iftarTime = times.find { it.name.contains("Iftar") }?.time ?: ""
+        
+        val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+        val now = sdf.format(Date())
+        
+        val nextMainEvent = when {
+            saherTime > now -> PrayerTime("Sehri", saherTime)
+            iftarTime > now -> PrayerTime("Iftar", iftarTime)
+            else -> PrayerTime("Sehri", saherTime) // Tomorrow
+        }
+        
+        prefs.edit().apply {
+            putString("saher", formatToAmPm(saherTime))
+            putString("iftar", formatToAmPm(iftarTime))
+            putString("saher_raw", saherTime)
+            putString("iftar_raw", iftarTime)
+            putString("nextEvent", nextMainEvent.name)
+            putString("nextTime", getCountdownString(nextMainEvent.time))
+            apply()
+        }
+
+        scope.launch {
+            NoorWidget().updateAll(context)
+        }
+        
+        // Start background worker for periodic updates
+        WidgetUpdateWorker.enqueue(context)
+    }
 
     fun scheduleNotification(time24h: String, title: String, message: String, id: Int) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -134,14 +167,15 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
                     locationName = "Location Found"
                     fetchPrayerTimes(location.latitude, location.longitude) { times ->
                         prayerTimes = times
-                        val next = calculateNextEvent(times)
-                        nextEvent = next
+                        nextEvent = calculateNextEvent(times)
+                        
+                        updateWidget(times)
                         
                         val saherTime = times.find { it.name.contains("Saher") }?.time ?: ""
                         val iftarTime = times.find { it.name.contains("Iftar") }?.time ?: ""
                         
-                        if (saherTime.isNotEmpty()) scheduleNotification(saherTime, "Sehri Time", "It's time for Sehri!", 1001)
-                        if (iftarTime.isNotEmpty()) scheduleNotification(iftarTime, "Iftar Time", "It's time for Iftar!", 1002)
+                        if (saherTime.isNotEmpty() && notificationGranted) scheduleNotification(saherTime, "Sehri Time", "It's time for Sehri!", 1001)
+                        if (iftarTime.isNotEmpty() && notificationGranted) scheduleNotification(iftarTime, "Iftar Time", "It's time for Iftar!", 1002)
 
                         isLoading = false
                     }
@@ -257,7 +291,7 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
 
             Text(
-                text = "All Prayer Times",
+                text = "Upcoming Prayer Times",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.align(Alignment.Start),
                 fontWeight = FontWeight.SemiBold
@@ -265,20 +299,33 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Show all timings
-            val upcomingTimes = prayerTimes.filter { it.time > now }
+            // Get next 5 prayer times (today's remaining + tomorrow's if needed)
+
+            // Get remaining times from today
+            val todayRemaining = prayerTimes.filter { it.time > now }
+
+            // Get times for tomorrow if we need more to reach 5
+            val nextDayTimes = if (todayRemaining.size < 5) {
+                prayerTimes.take(5 - todayRemaining.size).map {
+                    it.copy(isTomorrow = true)
+                }
+            } else {
+                emptyList()
+            }
+
+            val next5Times = (todayRemaining + nextDayTimes).take(5)
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (upcomingTimes.isEmpty()) {
+                if (next5Times.isEmpty()) {
                     item {
                         Text(
-                            text = "All of today's timings have passed. Check back tomorrow for the new schedule.",
+                            text = "No prayer times available.",
                             style = MaterialTheme.typography.bodyMedium,
                             modifier = Modifier.padding(vertical = 8.dp)
                         )
                     }
                 } else {
-                    items(upcomingTimes, key = { it.name }) { prayer ->
+                    items(next5Times, key = { "${it.name}-${it.isTomorrow}" }) { prayer ->
                         PrayerRow(prayer)
                     }
                 }
@@ -299,9 +346,11 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
                 onClick = { onThemeChange(!isDarkMode) },
                 modifier = Modifier.size(50.dp)
             ) {
-                Text(
-                    text = if (isDarkMode) "☀️" else "🌙",
-                    style = MaterialTheme.typography.titleLarge
+                Icon(
+                    imageVector = if (isDarkMode) Icons.Default.LightMode else Icons.Default.NightlightRound,
+                    contentDescription = "Toggle Theme",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(32.dp)
                 )
             }
         }
@@ -321,9 +370,32 @@ fun PrayerRow(prayer: PrayerTime) {
             modifier = Modifier
                 .padding(16.dp)
                 .fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(prayer.name, fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal)
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(prayer.name, fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal)
+                    if (prayer.isTomorrow) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(4.dp),
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                        ) {
+                            Text(
+                                text = "Tomorrow",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+            }
             Text(formatToAmPm(prayer.time), fontWeight = FontWeight.Bold)
         }
     }
@@ -355,8 +427,8 @@ fun getCountdownString(targetTime24h: String): String {
         }
 
         val diff = target.timeInMillis - now.timeInMillis
-        val hours = TimeUnit.MILLISECONDS.toHours(diff)
-        val minutes = TimeUnit.MILLISECONDS.toMinutes(diff) % 60
+        val hours = java.util.concurrent.TimeUnit.MILLISECONDS.toHours(diff)
+        val minutes = java.util.concurrent.TimeUnit.MILLISECONDS.toMinutes(diff) % 60
 
         return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
     } catch (e: Exception) {
