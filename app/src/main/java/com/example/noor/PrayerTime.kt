@@ -6,3 +6,10 @@ data class PrayerTime(
     val isHighlight: Boolean = false,
     val isTomorrow: Boolean = false
 )
+
+data class DayPrayerTimes(
+    val dayLabel: String,
+    val dateLabel: String,
+    val sehri: String,
+    val iftar: String
+)

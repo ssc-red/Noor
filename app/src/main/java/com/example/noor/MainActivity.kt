@@ -6,6 +6,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Build
 import android.os.Bundle
@@ -16,11 +17,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.NightlightRound
 import androidx.compose.material3.*
@@ -28,10 +32,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import androidx.glance.appwidget.updateAll
 import com.example.noor.ui.theme.NoorTheme
 import com.google.android.gms.location.LocationServices
@@ -73,6 +82,7 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
     var locationName by remember { mutableStateOf("Fetching location...") }
     var nextEvent by remember { mutableStateOf<PrayerTime?>(null) }
     var isLoading by remember { mutableStateOf(true) }
+    var showFutureDatesModal by remember { mutableStateOf(false) }
 
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
 
@@ -87,7 +97,7 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
         val nextMainEvent = when {
             sehriTime > now -> PrayerTime("Sehri", sehriTime)
             iftarTime > now -> PrayerTime("Iftar", iftarTime)
-            else -> PrayerTime("Sehri", sehriTime) // Tomorrow
+            else -> PrayerTime("Sehri", sehriTime) 
         }
         
         prefs.edit().apply {
@@ -104,7 +114,6 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
             NoorWidget().updateAll(context)
         }
         
-        // Start background worker for periodic updates
         WidgetUpdateWorker.enqueue(context)
     }
 
@@ -163,10 +172,16 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
             fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
                 if (location != null) {
                     locationName = "Location Found"
+                    val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
+                    prefs.edit().apply {
+                        putString("lastLat", location.latitude.toString())
+                        putString("lastLon", location.longitude.toString())
+                        apply()
+                    }
+
                     fetchPrayerTimes(location.latitude, location.longitude) { times ->
                         prayerTimes = times
                         nextEvent = calculateNextEvent(times)
-                        
                         updateWidget(times)
                         
                         val sehriTime = times.find { it.name.contains("Sehri") }?.time ?: ""
@@ -197,7 +212,6 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Centered title
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -236,22 +250,19 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
         if (isLoading) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
         } else {
-            // Display only the next Sehri or Iftar event at the top with countdown
             val sehriTime = prayerTimes.find { it.name.contains("Sehri") }?.time ?: ""
             val iftarTime = prayerTimes.find { it.name.contains("Iftar") }?.time ?: ""
             val sehriEvent = PrayerTime("Sehri", sehriTime)
             val iftarEvent = PrayerTime("Iftar", iftarTime)
 
-            // Determine which event is next
             val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
             val now = sdf.format(Date())
             val nextMainEvent = when {
                 sehriTime > now -> sehriEvent
                 iftarTime > now -> iftarEvent
-                else -> iftarEvent // Tomorrow's iftar
+                else -> iftarEvent 
             }
 
-            // Calculate countdown hours for the next event
             val countdownHours = getCountdownString(nextMainEvent.time)
 
             Card(
@@ -297,19 +308,10 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Get next 5 prayer times (today's remaining + tomorrow's if needed)
-
-            // Get remaining times from today
             val todayRemaining = prayerTimes.filter { it.time > now }
-
-            // Get times for tomorrow if we need more to reach 5
             val nextDayTimes = if (todayRemaining.size < 5) {
-                prayerTimes.take(5 - todayRemaining.size).map {
-                    it.copy(isTomorrow = true)
-                }
-            } else {
-                emptyList()
-            }
+                prayerTimes.take(5 - todayRemaining.size).map { it.copy(isTomorrow = true) }
+            } else emptyList()
 
             val next5Times = (todayRemaining + nextDayTimes).take(5)
 
@@ -330,23 +332,26 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
             }
         }
 
-        // Spacer to push button to bottom
         Spacer(modifier = Modifier.weight(1f))
 
-        // Theme toggle button at bottom right
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 10.dp),
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(
+                onClick = { showFutureDatesModal = true },
+                modifier = Modifier.size(50.dp)
+            ) {
+                Text(text = "📅", style = MaterialTheme.typography.headlineSmall)
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             IconButton(
                 onClick = {
                     onThemeChange(!isDarkMode)
-                    // Update widget when theme changes
-                    MainScope().launch {
-                        NoorWidget().updateAll(context)
-                    }
+                    MainScope().launch { NoorWidget().updateAll(context) }
                 },
                 modifier = Modifier.size(50.dp)
             ) {
@@ -358,6 +363,12 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
                 )
             }
         }
+    }
+
+    if (showFutureDatesModal) {
+        FutureDatesDialog(
+            onDismiss = { showFutureDatesModal = false }
+        )
     }
 }
 
@@ -377,30 +388,152 @@ fun PrayerRow(prayer: PrayerTime) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(prayer.name, fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal)
-                    if (prayer.isTomorrow) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.primary,
-                            shape = RoundedCornerShape(4.dp),
-                            modifier = Modifier.clip(RoundedCornerShape(4.dp))
-                        ) {
-                            Text(
-                                text = "Tomorrow",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
-                        }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(prayer.name, fontWeight = if (isMain) FontWeight.Bold else FontWeight.Normal)
+                if (prayer.isTomorrow) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Text(
+                            text = "Tomorrow",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
                     }
                 }
             }
             Text(formatToAmPm(prayer.time), fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+@Composable
+fun FutureDatesDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
+    val lastLat = prefs.getString("lastLat", "0.0")?.toDoubleOrNull() ?: 0.0
+    val lastLon = prefs.getString("lastLon", "0.0")?.toDoubleOrNull() ?: 0.0
+    
+    var futureTimes by remember { mutableStateOf<List<DayPrayerTimes>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        fetchRamadanPrayerTimes(lastLat, lastLon) { times ->
+            futureTimes = times
+            isLoading = false
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.85f).clip(RoundedCornerShape(24.dp)),
+            color = MaterialTheme.colorScheme.background,
+            shape = RoundedCornerShape(24.dp)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Column {
+                        Text("Ramadan Timetable", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Text("Remaining days", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                    }
+                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Close", tint = MaterialTheme.colorScheme.primary) }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                if (isLoading) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                } else if (futureTimes.isEmpty()) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Text("No data available. Check connection.", color = MaterialTheme.colorScheme.error)
+                    }
+                } else {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    ) {
+                        Row(modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Day", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                            Text("Date", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                            Text("Sehri", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge)
+                            Text("Iftar", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    LazyColumn(modifier = Modifier.weight(1f)) {
+                        itemsIndexed(futureTimes) { index, day ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(if (index % 2 != 0) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f) else Color.Transparent)
+                                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(day.dayLabel, modifier = Modifier.weight(0.7f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                Text(day.dateLabel, modifier = Modifier.weight(1.3f), style = MaterialTheme.typography.bodySmall)
+                                Text(formatToAmPm(day.sehri), modifier = Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+                                Text(formatToAmPm(day.iftar), modifier = Modifier.weight(1f), textAlign = TextAlign.End, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(onClick = onDismiss, modifier = Modifier.fillMaxWidth().height(50.dp), shape = RoundedCornerShape(12.dp)) { Text("Done", fontWeight = FontWeight.Bold) }
+            }
+        }
+    }
+}
+
+fun fetchRamadanPrayerTimes(lat: Double, lon: Double, onResult: (List<DayPrayerTimes>) -> Unit) {
+    MainScope().launch(Dispatchers.IO) {
+        val results = mutableListOf<DayPrayerTimes>()
+        try {
+            // 1. Get current Hijri date to find Ramadan day
+            val todayUrl = URL("https://api.aladhan.com/v1/timings?latitude=$lat&longitude=$lon&method=2&school=1")
+            val todayConnection = todayUrl.openConnection()
+            val todayText = todayConnection.getInputStream().bufferedReader().readText()
+            val hijriData = JSONObject(todayText).getJSONObject("data").getJSONObject("date").getJSONObject("hijri")
+            val currentHijriDay = hijriData.getString("day").toInt()
+            val currentHijriMonth = hijriData.getJSONObject("month").getInt("number")
+            val currentHijriYear = hijriData.getString("year").toInt()
+
+            // If we are past Ramadan (month 9), we target the next year's Ramadan
+            val targetYear = if (currentHijriMonth > 9) currentHijriYear + 1 else currentHijriYear
+
+            // Correct official endpoint for Hijri Calendar By Lat Long
+            // Documentation: https://aladhan.com/prayer-times-api#hijriCalendarByLatLong
+            val calendarUrl = URL("https://api.aladhan.com/v1/hijriCalendar?latitude=$lat&longitude=$lon&method=2&month=9&year=$targetYear")
+            val calendarConnection = calendarUrl.openConnection()
+            val responseText = calendarConnection.getInputStream().bufferedReader().readText()
+            val dataArray = JSONObject(responseText).getJSONArray("data")
+
+            for (i in 0 until dataArray.length()) {
+                val dayData = dataArray.getJSONObject(i)
+                val dayOfMonth = dayData.getJSONObject("date").getJSONObject("hijri").getString("day").toInt()
+                if (currentHijriMonth != 9 || dayOfMonth >= currentHijriDay) {
+                    val readableDate = dayData.getJSONObject("date").getString("readable")
+                    val timings = dayData.getJSONObject("timings")
+
+                    results.add(DayPrayerTimes(
+                        dayLabel = "$dayOfMonth",
+                        dateLabel = readableDate.split(" ").take(2).joinToString(" "),
+                        sehri = timings.getString("Fajr"),
+                        iftar = timings.getString("Maghrib")
+                    ))
+                }
+            }
+            withContext(Dispatchers.Main) { onResult(results) }
+        } catch (e: Exception) { 
+            e.printStackTrace()
+            withContext(Dispatchers.Main) { onResult(emptyList()) }
         }
     }
 }
@@ -412,9 +545,7 @@ fun formatToAmPm(time24h: String): String {
         val sdf12 = SimpleDateFormat("hh:mm a", Locale.getDefault())
         val date = sdf24.parse(time24h)
         date?.let { sdf12.format(it) } ?: time24h
-    } catch (e: Exception) {
-        time24h
-    }
+    } catch (e: Exception) { time24h }
 }
 
 fun getCountdownString(targetTime24h: String): String {
@@ -425,29 +556,21 @@ fun getCountdownString(targetTime24h: String): String {
         target.set(Calendar.HOUR_OF_DAY, parts[0].toInt())
         target.set(Calendar.MINUTE, parts[1].toInt())
         target.set(Calendar.SECOND, 0)
-
-        if (target.before(now)) {
-            target.add(Calendar.DAY_OF_YEAR, 1)
-        }
-
+        if (target.before(Calendar.getInstance())) target.add(Calendar.DAY_OF_YEAR, 1)
         val diff = target.timeInMillis - now.timeInMillis
         val hours = java.util.concurrent.TimeUnit.MILLISECONDS.toHours(diff)
         val minutes = java.util.concurrent.TimeUnit.MILLISECONDS.toMinutes(diff) % 60
-
         return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
-    } catch (e: Exception) {
-        return ""
-    }
+    } catch (e: Exception) { return "" }
 }
 
 fun fetchPrayerTimes(lat: Double, lon: Double, onResult: (List<PrayerTime>) -> Unit) {
-    MainScope().launch(Dispatchers.Default) {
+    MainScope().launch(Dispatchers.IO) {
         try {
             val url = URL("https://api.aladhan.com/v1/timings?latitude=$lat&longitude=$lon&method=2&school=1")
             val connection = url.openConnection()
             val text = connection.getInputStream().bufferedReader().readText()
             val timings = JSONObject(text).getJSONObject("data").getJSONObject("timings")
-
             val list = listOf(
                 PrayerTime("Sehri / Fajr", timings.getString("Fajr")),
                 PrayerTime("Dhuhr", timings.getString("Dhuhr")),
@@ -455,12 +578,8 @@ fun fetchPrayerTimes(lat: Double, lon: Double, onResult: (List<PrayerTime>) -> U
                 PrayerTime("Iftar / Maghrib", timings.getString("Maghrib")),
                 PrayerTime("Isha", timings.getString("Isha"))
             )
-            withContext(Dispatchers.Main) {
-                onResult(list)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+            withContext(Dispatchers.Main) { onResult(list) }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 }
 
@@ -468,8 +587,5 @@ fun calculateNextEvent(times: List<PrayerTime>): PrayerTime? {
     if (times.isEmpty()) return null
     val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
     val now = sdf.format(Date())
-
-    val next = times.filter { it.time > now }.minByOrNull { it.time }
-
-    return next ?: times.firstOrNull()?.copy(isTomorrow = true)
+    return times.filter { it.time > now }.minByOrNull { it.time } ?: times.firstOrNull()?.copy(isTomorrow = true)
 }
