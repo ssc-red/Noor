@@ -88,17 +88,16 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
 
     fun updateWidget(times: List<PrayerTime>) {
         val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
-        val sehriTime = times.find { it.name.contains("Sehri") }?.time ?: ""
-        val iftarTime = times.find { it.name.contains("Iftar") }?.time ?: ""
+        val sehriTime = times.find { it.name.contains("Sehri") && !it.isTomorrow }?.time ?: ""
+        val iftarTime = times.find { it.name.contains("Iftar") && !it.isTomorrow }?.time ?: ""
         
         val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
         val now = sdf.format(Date())
         
-        val nextMainEvent = when {
-            sehriTime > now -> PrayerTime("Sehri", sehriTime)
-            iftarTime > now -> PrayerTime("Iftar", iftarTime)
-            else -> PrayerTime("Sehri", sehriTime) 
-        }
+        val nextMainEvent = times
+            .filter { it.name.contains("Sehri") || it.name.contains("Iftar") }
+            .firstOrNull { it.isTomorrow || it.time > now }
+            ?: times.first { it.isTomorrow && it.name.contains("Sehri") }
         
         prefs.edit().apply {
             putString("sehri", formatToAmPm(sehriTime))
@@ -184,8 +183,8 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
                         nextEvent = calculateNextEvent(times)
                         updateWidget(times)
                         
-                        val sehriTime = times.find { it.name.contains("Sehri") }?.time ?: ""
-                        val iftarTime = times.find { it.name.contains("Iftar") }?.time ?: ""
+                        val sehriTime = times.find { it.name.contains("Sehri") && !it.isTomorrow }?.time ?: ""
+                        val iftarTime = times.find { it.name.contains("Iftar") && !it.isTomorrow }?.time ?: ""
                         
                         if (sehriTime.isNotEmpty() && notificationGranted) scheduleNotification(sehriTime, "Sehri Time", "It's time for Sehri!", 1001)
                         if (iftarTime.isNotEmpty() && notificationGranted) scheduleNotification(iftarTime, "Iftar Time", "It's time for Iftar!", 1002)
@@ -250,18 +249,13 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
         if (isLoading) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
         } else {
-            val sehriTime = prayerTimes.find { it.name.contains("Sehri") }?.time ?: ""
-            val iftarTime = prayerTimes.find { it.name.contains("Iftar") }?.time ?: ""
-            val sehriEvent = PrayerTime("Sehri", sehriTime)
-            val iftarEvent = PrayerTime("Iftar", iftarTime)
-
             val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
             val now = sdf.format(Date())
-            val nextMainEvent = when {
-                sehriTime > now -> sehriEvent
-                iftarTime > now -> iftarEvent
-                else -> iftarEvent 
-            }
+            
+            val nextMainEvent = prayerTimes
+                .filter { it.name.contains("Sehri") || it.name.contains("Iftar") }
+                .firstOrNull { it.isTomorrow || it.time > now }
+                ?: prayerTimes.first { it.isTomorrow && it.name.contains("Sehri") }
 
             val countdownHours = getCountdownString(nextMainEvent.time)
 
@@ -308,12 +302,7 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            val todayRemaining = prayerTimes.filter { it.time > now }
-            val nextDayTimes = if (todayRemaining.size < 5) {
-                prayerTimes.take(5 - todayRemaining.size).map { it.copy(isTomorrow = true) }
-            } else emptyList()
-
-            val next5Times = (todayRemaining + nextDayTimes).take(5)
+            val next5Times = prayerTimes.filter { it.isTomorrow || it.time > now }.take(5)
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (next5Times.isEmpty()) {
@@ -414,16 +403,36 @@ fun PrayerRow(prayer: PrayerTime) {
 fun FutureDatesDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
-    val lastLat = prefs.getString("lastLat", "0.0")?.toDoubleOrNull() ?: 0.0
-    val lastLon = prefs.getString("lastLon", "0.0")?.toDoubleOrNull() ?: 0.0
-    
-    var futureTimes by remember { mutableStateOf<List<DayPrayerTimes>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
+    var lat by remember { mutableStateOf(prefs.getString("lastLat", null)?.toDoubleOrNull() ?: 0.0) }
+    var lon by remember { mutableStateOf(prefs.getString("lastLon", null)?.toDoubleOrNull() ?: 0.0) }
 
-    LaunchedEffect(Unit) {
-        fetchRamadanPrayerTimes(lastLat, lastLon) { times ->
-            futureTimes = times
+    val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+
+    var futureTimes by remember { mutableStateOf<List<DayPrayerTimes>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+    var locationAttempted by remember { mutableStateOf(false) }
+    var lastError by remember { mutableStateOf<String?>(null) }
+
+    val dialogScope = rememberCoroutineScope()
+
+    suspend fun doFetch(latVal: Double, lonVal: Double) {
+        isLoading = true
+        lastError = null
+        try {
+            fetchRamadanPrayerTimes(latVal, lonVal) { times ->
+                futureTimes = times
+                isLoading = false
+            }
+        } catch (e: Exception) {
+            lastError = e.message ?: "Unknown error"
             isLoading = false
+        }
+    }
+
+    LaunchedEffect(lat, lon) {
+        // If we have valid coords, fetch immediately
+        if (lat != 0.0 || lon != 0.0) {
+            doFetch(lat, lon)
         }
     }
 
@@ -444,43 +453,94 @@ fun FutureDatesDialog(onDismiss: () -> Unit) {
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                if (isLoading) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
-                } else if (futureTimes.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No data available. Check connection.", color = MaterialTheme.colorScheme.error)
-                    }
-                } else {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer,
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                    ) {
-                        Row(modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text("Day", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
-                            Text("Date", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
-                            Text("Sehri", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge)
-                            Text("Iftar", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+                // If no saved location, show action to use device location or instructions
+                if ((lat == 0.0 && lon == 0.0) && !isLoading) {
+                    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Location not available", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.error)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("To load Ramadan timetable we need your location. You can allow the app to use your last known device location or enter coordinates in settings.", style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            Button(onClick = {
+                                // Try to get last known location if permission granted
+                                if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                                    fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
+                                        if (location != null) {
+                                            lat = location.latitude
+                                            lon = location.longitude
+                                            prefs.edit().apply { putString("lastLat", lat.toString()); putString("lastLon", lon.toString()); apply() }
+                                            // trigger fetch via LaunchedEffect
+                                        } else {
+                                            lastError = "No last known location available"
+                                        }
+                                    }.addOnFailureListener { ex -> lastError = ex.message }
+                                } else {
+                                    // Request permission via settings (we are in dialog, better to instruct)
+                                    lastError = "Location permission not granted. Please enable location permission in app settings."
+                                }
+                            }) {
+                                Text("Use device location")
+                            }
+
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            Button(onClick = {
+                                // Retry fetch with defaults (may return empty) or instruct user
+                                dialogScope.launch { doFetch(lat, lon) }
+                            }) {
+                                Text("Retry")
+                            }
+                        }
+
+                        lastError?.let { err ->
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(text = err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    LazyColumn(modifier = Modifier.weight(1f)) {
-                        itemsIndexed(futureTimes) { index, day ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(if (index % 2 != 0) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f) else Color.Transparent)
-                                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(day.dayLabel, modifier = Modifier.weight(0.7f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-                                Text(day.dateLabel, modifier = Modifier.weight(1.3f), style = MaterialTheme.typography.bodySmall)
-                                Text(formatToAmPm(day.sehri), modifier = Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
-                                Text(formatToAmPm(day.iftar), modifier = Modifier.weight(1f), textAlign = TextAlign.End, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    // Show loading / results
+                    if (isLoading) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                    } else if (futureTimes.isEmpty()) {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("No Ramadan data found for this location.", color = MaterialTheme.colorScheme.error)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Button(onClick = { dialogScope.launch { doFetch(lat, lon) } }) { Text("Retry") }
                             }
-                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                        }
+                    } else {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                        ) {
+                            Row(modifier = Modifier.padding(vertical = 10.dp, horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Day", modifier = Modifier.weight(0.7f), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                                Text("Date", modifier = Modifier.weight(1.3f), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                                Text("Sehri", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, style = MaterialTheme.typography.labelLarge)
+                                Text("Iftar", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, textAlign = TextAlign.End, style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        LazyColumn(modifier = Modifier.weight(1f)) {
+                            itemsIndexed(futureTimes) { index, day ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(if (index % 2 != 0) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f) else Color.Transparent)
+                                        .padding(horizontal = 12.dp, vertical = 12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(day.dayLabel, modifier = Modifier.weight(0.7f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                    Text(day.dateLabel, modifier = Modifier.weight(1.3f), style = MaterialTheme.typography.bodySmall)
+                                    Text(formatToAmPm(day.sehri), modifier = Modifier.weight(1f), textAlign = TextAlign.Center, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
+                                    Text(formatToAmPm(day.iftar), modifier = Modifier.weight(1f), textAlign = TextAlign.End, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                            }
                         }
                     }
                 }
@@ -496,44 +556,51 @@ fun fetchRamadanPrayerTimes(lat: Double, lon: Double, onResult: (List<DayPrayerT
     MainScope().launch(Dispatchers.IO) {
         val results = mutableListOf<DayPrayerTimes>()
         try {
-            // 1. Get current Hijri date to find Ramadan day
-            val todayUrl = URL("https://api.aladhan.com/v1/timings?latitude=$lat&longitude=$lon&method=2&school=1")
-            val todayConnection = todayUrl.openConnection()
-            val todayText = todayConnection.getInputStream().bufferedReader().readText()
-            val hijriData = JSONObject(todayText).getJSONObject("data").getJSONObject("date").getJSONObject("hijri")
-            val currentHijriDay = hijriData.getString("day").toInt()
-            val currentHijriMonth = hijriData.getJSONObject("month").getInt("number")
-            val currentHijriYear = hijriData.getString("year").toInt()
+            // Scan the next 90 Gregorian days; collect days whose hijri month == 9 (Ramadan)
+            val dateFormat = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
+            var collecting = false
+            for (offset in 0..89) {
+                try {
+                    val d = Calendar.getInstance()
+                    d.add(Calendar.DAY_OF_YEAR, offset)
+                    val dateStr = dateFormat.format(d.time)
 
-            // If we are past Ramadan (month 9), we target the next year's Ramadan
-            val targetYear = if (currentHijriMonth > 9) currentHijriYear + 1 else currentHijriYear
+                    val url = URL("https://api.aladhan.com/v1/timings/$dateStr?latitude=$lat&longitude=$lon&method=2&school=1")
+                    val text = url.readText()
+                    val data = JSONObject(text).getJSONObject("data")
 
-            // Correct official endpoint for Hijri Calendar By Lat Long
-            // Documentation: https://aladhan.com/prayer-times-api#hijriCalendarByLatLong
-            val calendarUrl = URL("https://api.aladhan.com/v1/hijriCalendar?latitude=$lat&longitude=$lon&method=2&month=9&year=$targetYear")
-            val calendarConnection = calendarUrl.openConnection()
-            val responseText = calendarConnection.getInputStream().bufferedReader().readText()
-            val dataArray = JSONObject(responseText).getJSONArray("data")
+                    val hijri = data.getJSONObject("date").getJSONObject("hijri")
+                    val hijriMonth = try { hijri.getJSONObject("month").getInt("number") } catch (e: Exception) { hijri.getInt("month") }
+                    val hijriDay = hijri.getString("day").toIntOrNull() ?: continue
 
-            for (i in 0 until dataArray.length()) {
-                val dayData = dataArray.getJSONObject(i)
-                val dayOfMonth = dayData.getJSONObject("date").getJSONObject("hijri").getString("day").toInt()
-                if (currentHijriMonth != 9 || dayOfMonth >= currentHijriDay) {
-                    val readableDate = dayData.getJSONObject("date").getString("readable")
-                    val timings = dayData.getJSONObject("timings")
+                    val readableDate = data.getJSONObject("date").getString("readable")
+                    val timings = data.getJSONObject("timings")
 
-                    results.add(DayPrayerTimes(
-                        dayLabel = "$dayOfMonth",
-                        dateLabel = readableDate.split(" ").take(2).joinToString(" "),
-                        sehri = timings.getString("Fajr"),
-                        iftar = timings.getString("Maghrib")
-                    ))
+                    if (hijriMonth == 9) {
+                        collecting = true
+                        results.add(
+                            DayPrayerTimes(
+                                dayLabel = "$hijriDay",
+                                dateLabel = readableDate.split(" ").take(2).joinToString(" "),
+                                sehri = timings.getString("Fajr").split(" ").firstOrNull() ?: timings.getString("Fajr"),
+                                iftar = timings.getString("Maghrib").split(" ").firstOrNull() ?: timings.getString("Maghrib")
+                            )
+                        )
+                    } else if (collecting) {
+                        // Ramadan started earlier and now month changed -> done
+                        break
+                    }
+                } catch (inner: Exception) {
+                    // skip this date on error but continue scanning
+                    inner.printStackTrace()
                 }
             }
-            withContext(Dispatchers.Main) { onResult(results) }
-        } catch (e: Exception) { 
+        } catch (e: Exception) {
             e.printStackTrace()
-            withContext(Dispatchers.Main) { onResult(emptyList()) }
+        }
+
+        withContext(Dispatchers.Main) {
+            onResult(results)
         }
     }
 }
@@ -567,25 +634,37 @@ fun getCountdownString(targetTime24h: String): String {
 fun fetchPrayerTimes(lat: Double, lon: Double, onResult: (List<PrayerTime>) -> Unit) {
     MainScope().launch(Dispatchers.IO) {
         try {
-            val url = URL("https://api.aladhan.com/v1/timings?latitude=$lat&longitude=$lon&method=2&school=1")
-            val connection = url.openConnection()
-            val text = connection.getInputStream().bufferedReader().readText()
-            val timings = JSONObject(text).getJSONObject("data").getJSONObject("timings")
-            val list = listOf(
-                PrayerTime("Sehri / Fajr", timings.getString("Fajr")),
-                PrayerTime("Dhuhr", timings.getString("Dhuhr")),
-                PrayerTime("Asr", timings.getString("Asr")),
-                PrayerTime("Iftar / Maghrib", timings.getString("Maghrib")),
-                PrayerTime("Isha", timings.getString("Isha"))
-            )
-            withContext(Dispatchers.Main) { onResult(list) }
-        } catch (e: Exception) { e.printStackTrace() }
+            val sdf = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
+            val today = Calendar.getInstance()
+            val tomorrow = Calendar.getInstance().apply { add(Calendar.DAY_OF_YEAR, 1) }
+
+            val todayList = fetchTimingsForDate(lat, lon, sdf.format(today.time))
+            val tomorrowList = fetchTimingsForDate(lat, lon, sdf.format(tomorrow.time)).map { it.copy(isTomorrow = true) }
+
+            withContext(Dispatchers.Main) {
+                onResult(todayList + tomorrowList)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
 
+private fun fetchTimingsForDate(lat: Double, lon: Double, date: String): List<PrayerTime> {
+    val url = URL("https://api.aladhan.com/v1/timings/$date?latitude=$lat&longitude=$lon&method=2&school=1")
+    val text = url.readText()
+    val timings = JSONObject(text).getJSONObject("data").getJSONObject("timings")
+    return listOf(
+        PrayerTime("Sehri / Fajr", timings.getString("Fajr")),
+        PrayerTime("Dhuhr", timings.getString("Dhuhr")),
+        PrayerTime("Asr", timings.getString("Asr")),
+        PrayerTime("Iftar / Maghrib", timings.getString("Maghrib")),
+        PrayerTime("Isha", timings.getString("Isha"))
+    )
+}
+
 fun calculateNextEvent(times: List<PrayerTime>): PrayerTime? {
-    if (times.isEmpty()) return null
     val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
     val now = sdf.format(Date())
-    return times.filter { it.time > now }.minByOrNull { it.time } ?: times.firstOrNull()?.copy(isTomorrow = true)
+    return times.firstOrNull { it.isTomorrow || it.time > now }
 }
