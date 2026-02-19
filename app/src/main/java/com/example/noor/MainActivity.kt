@@ -6,6 +6,7 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Build
@@ -16,6 +17,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -25,6 +27,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.NightlightRound
 import androidx.compose.material3.*
@@ -48,6 +51,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URL
 import java.text.SimpleDateFormat
@@ -88,17 +92,25 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
 
     fun updateWidget(times: List<PrayerTime>) {
         val prefs = context.getSharedPreferences("NoorPrefs", Context.MODE_PRIVATE)
-        val sehriTime = times.find { it.name.contains("Sehri") && !it.isTomorrow }?.time ?: ""
-        val iftarTime = times.find { it.name.contains("Iftar") && !it.isTomorrow }?.time ?: ""
-        
         val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
         val now = sdf.format(Date())
-        
+
+        val nextSehri = times
+            .filter { it.name.contains("Sehri") }
+            .firstOrNull { it.isTomorrow || it.time > now }
+
+        val nextIftar = times
+            .filter { it.name.contains("Iftar") }
+            .firstOrNull { it.isTomorrow || it.time > now }
+
+        val sehriTime = nextSehri?.time ?: ""
+        val iftarTime = nextIftar?.time ?: ""
+
         val nextMainEvent = times
             .filter { it.name.contains("Sehri") || it.name.contains("Iftar") }
             .firstOrNull { it.isTomorrow || it.time > now }
             ?: times.first { it.isTomorrow && it.name.contains("Sehri") }
-        
+
         prefs.edit().apply {
             putString("sehri", formatToAmPm(sehriTime))
             putString("iftar", formatToAmPm(iftarTime))
@@ -112,7 +124,7 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
         scope.launch {
             NoorWidget().updateAll(context)
         }
-        
+
         WidgetUpdateWorker.enqueue(context)
     }
 
@@ -278,7 +290,7 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
                         text = formatToAmPm(nextMainEvent.time),
                         style = MaterialTheme.typography.displaySmall,
                         fontWeight = FontWeight.ExtraBold,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.primary.copy(0.86f)
                     )
                     if (countdownHours.isNotEmpty()) {
                         Text(
@@ -334,7 +346,12 @@ fun RamadanScreen(isDarkMode: Boolean, onThemeChange: (Boolean) -> Unit) {
                 onClick = { showFutureDatesModal = true },
                 modifier = Modifier.size(50.dp)
             ) {
-                Text(text = "📅", style = MaterialTheme.typography.headlineSmall)
+                Icon(
+                    imageVector = Icons.Default.DateRange,
+                    contentDescription = "Calendar",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
             }
             Spacer(modifier = Modifier.width(8.dp))
             IconButton(
@@ -409,30 +426,47 @@ fun FutureDatesDialog(onDismiss: () -> Unit) {
     val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
 
     var futureTimes by remember { mutableStateOf<List<DayPrayerTimes>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(false) }
-    var locationAttempted by remember { mutableStateOf(false) }
+    var isLoading by remember { mutableStateOf(lat != 0.0 || lon != 0.0) }
+    var hasLoadedOnce by remember { mutableStateOf(false) }
     var lastError by remember { mutableStateOf<String?>(null) }
 
     val dialogScope = rememberCoroutineScope()
 
-    suspend fun doFetch(latVal: Double, lonVal: Double) {
+    suspend fun doFetch(latVal: Double, lonVal: Double, forceRefresh: Boolean = false) {
+        val cached = if (!forceRefresh) loadRamadanCache(prefs, latVal, lonVal) else null
+        if (cached != null) {
+            futureTimes = cached
+            isLoading = false
+            hasLoadedOnce = true
+            return
+        }
+
         isLoading = true
         lastError = null
         try {
             fetchRamadanPrayerTimes(latVal, lonVal) { times ->
                 futureTimes = times
                 isLoading = false
+                hasLoadedOnce = true
+                if (times.isNotEmpty()) {
+                    saveRamadanCache(prefs, latVal, lonVal, times)
+                }
             }
         } catch (e: Exception) {
             lastError = e.message ?: "Unknown error"
             isLoading = false
+            hasLoadedOnce = true
         }
     }
 
     LaunchedEffect(lat, lon) {
-        // If we have valid coords, fetch immediately
-        if (lat != 0.0 || lon != 0.0) {
+        val hasCoords = lat != 0.0 || lon != 0.0
+        if (hasCoords) {
+            isLoading = true
             doFetch(lat, lon)
+        } else {
+            isLoading = false
+            hasLoadedOnce = false
         }
     }
 
@@ -486,7 +520,7 @@ fun FutureDatesDialog(onDismiss: () -> Unit) {
 
                             Button(onClick = {
                                 // Retry fetch with defaults (may return empty) or instruct user
-                                dialogScope.launch { doFetch(lat, lon) }
+                                dialogScope.launch { doFetch(lat, lon, forceRefresh = true) }
                             }) {
                                 Text("Retry")
                             }
@@ -498,15 +532,18 @@ fun FutureDatesDialog(onDismiss: () -> Unit) {
                         }
                     }
                 } else {
+                    val hasCoords = lat != 0.0 || lon != 0.0
+                    val showLoading = isLoading || (hasCoords && !hasLoadedOnce)
+
                     // Show loading / results
-                    if (isLoading) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                    if (showLoading) {
+                        RamadanLoadingList()
                     } else if (futureTimes.isEmpty()) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text("No Ramadan data found for this location.", color = MaterialTheme.colorScheme.error)
                                 Spacer(modifier = Modifier.height(8.dp))
-                                Button(onClick = { dialogScope.launch { doFetch(lat, lon) } }) { Text("Retry") }
+                                Button(onClick = { dialogScope.launch { doFetch(lat, lon, forceRefresh = true) } }) { Text("Retry") }
                             }
                         }
                     } else {
@@ -556,44 +593,74 @@ fun fetchRamadanPrayerTimes(lat: Double, lon: Double, onResult: (List<DayPrayerT
     MainScope().launch(Dispatchers.IO) {
         val results = mutableListOf<DayPrayerTimes>()
         try {
-            // Scan the next 90 Gregorian days; collect days whose hijri month == 9 (Ramadan)
-            val dateFormat = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
-            var collecting = false
-            for (offset in 0..89) {
+            val calendar = Calendar.getInstance()
+            val todayStart = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }
+            var month = calendar.get(Calendar.MONTH) + 1
+            var year = calendar.get(Calendar.YEAR)
+            var foundRamadan = false
+            var finished = false
+            var safety = 0
+
+            while (safety < 12 && !finished) {
                 try {
-                    val d = Calendar.getInstance()
-                    d.add(Calendar.DAY_OF_YEAR, offset)
-                    val dateStr = dateFormat.format(d.time)
+                    val monthData = fetchCalendarMonth(lat, lon, month, year)
+                    for (i in 0 until monthData.length()) {
+                        val data = monthData.getJSONObject(i)
+                        val hijri = data.getJSONObject("date").getJSONObject("hijri")
+                        val hijriMonth = try { hijri.getJSONObject("month").getInt("number") } catch (e: Exception) { hijri.getInt("month") }
+                        val hijriDay = hijri.getString("day").toIntOrNull() ?: continue
 
-                    val url = URL("https://api.aladhan.com/v1/timings/$dateStr?latitude=$lat&longitude=$lon&method=2&school=1")
-                    val text = url.readText()
-                    val data = JSONObject(text).getJSONObject("data")
+                        if (hijriMonth == 9) {
+                            foundRamadan = true
+                            val gregorian = data.getJSONObject("date").getJSONObject("gregorian")
+                            val gDay = gregorian.getString("day").toIntOrNull() ?: continue
+                            val gMonth = gregorian.getJSONObject("month").getInt("number")
+                            val gYear = gregorian.getString("year").toIntOrNull() ?: continue
+                            val gDate = Calendar.getInstance().apply {
+                                set(Calendar.YEAR, gYear)
+                                set(Calendar.MONTH, gMonth - 1)
+                                set(Calendar.DAY_OF_MONTH, gDay)
+                                set(Calendar.HOUR_OF_DAY, 0)
+                                set(Calendar.MINUTE, 0)
+                                set(Calendar.SECOND, 0)
+                                set(Calendar.MILLISECOND, 0)
+                            }
+                            if (gDate.before(todayStart)) {
+                                continue
+                            }
 
-                    val hijri = data.getJSONObject("date").getJSONObject("hijri")
-                    val hijriMonth = try { hijri.getJSONObject("month").getInt("number") } catch (e: Exception) { hijri.getInt("month") }
-                    val hijriDay = hijri.getString("day").toIntOrNull() ?: continue
-
-                    val readableDate = data.getJSONObject("date").getString("readable")
-                    val timings = data.getJSONObject("timings")
-
-                    if (hijriMonth == 9) {
-                        collecting = true
-                        results.add(
-                            DayPrayerTimes(
-                                dayLabel = "$hijriDay",
-                                dateLabel = readableDate.split(" ").take(2).joinToString(" "),
-                                sehri = timings.getString("Fajr").split(" ").firstOrNull() ?: timings.getString("Fajr"),
-                                iftar = timings.getString("Maghrib").split(" ").firstOrNull() ?: timings.getString("Maghrib")
+                            val readableDate = data.getJSONObject("date").getString("readable")
+                            val timings = data.getJSONObject("timings")
+                            results.add(
+                                DayPrayerTimes(
+                                    dayLabel = "$hijriDay",
+                                    dateLabel = readableDate.split(" ").take(2).joinToString(" "),
+                                    sehri = timings.getString("Fajr").split(" ").firstOrNull() ?: timings.getString("Fajr"),
+                                    iftar = timings.getString("Maghrib").split(" ").firstOrNull() ?: timings.getString("Maghrib")
+                                )
                             )
-                        )
-                    } else if (collecting) {
-                        // Ramadan started earlier and now month changed -> done
-                        break
+                        } else if (foundRamadan) {
+                            finished = true
+                            break
+                        }
                     }
                 } catch (inner: Exception) {
-                    // skip this date on error but continue scanning
                     inner.printStackTrace()
                 }
+
+                if (finished) {
+                    break
+                }
+
+                val next = nextGregorianMonth(month, year)
+                month = next.first
+                year = next.second
+                safety++
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -603,6 +670,70 @@ fun fetchRamadanPrayerTimes(lat: Double, lon: Double, onResult: (List<DayPrayerT
             onResult(results)
         }
     }
+}
+
+private fun fetchCalendarMonth(lat: Double, lon: Double, month: Int, year: Int): JSONArray {
+    val url = URL("https://api.aladhan.com/v1/calendar?latitude=$lat&longitude=$lon&method=2&school=1&month=$month&year=$year")
+    val text = url.readText()
+    return JSONObject(text).getJSONArray("data")
+}
+
+private fun nextGregorianMonth(month: Int, year: Int): Pair<Int, Int> {
+    return if (month >= 12) 1 to (year + 1) else (month + 1) to year
+}
+
+private const val RAMADAN_CACHE_TTL_MS = 12 * 60 * 60 * 1000L
+
+private fun buildRamadanCacheKey(lat: Double, lon: Double): String {
+    val roundedLat = String.format(Locale.US, "%.2f", lat)
+    val roundedLon = String.format(Locale.US, "%.2f", lon)
+    return "$roundedLat,$roundedLon"
+}
+
+private fun loadRamadanCache(prefs: SharedPreferences, lat: Double, lon: Double): List<DayPrayerTimes>? {
+    val cacheKey = prefs.getString("ramadan_cache_key", null) ?: return null
+    if (cacheKey != buildRamadanCacheKey(lat, lon)) return null
+
+    val cachedAt = prefs.getLong("ramadan_cache_time", 0L)
+    if (System.currentTimeMillis() - cachedAt > RAMADAN_CACHE_TTL_MS) return null
+
+    val json = prefs.getString("ramadan_cache_data", null) ?: return null
+    return try {
+        val array = JSONArray(json)
+        val items = mutableListOf<DayPrayerTimes>()
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            items.add(
+                DayPrayerTimes(
+                    dayLabel = obj.optString("dayLabel"),
+                    dateLabel = obj.optString("dateLabel"),
+                    sehri = obj.optString("sehri"),
+                    iftar = obj.optString("iftar")
+                )
+            )
+        }
+        items
+    } catch (e: Exception) {
+        null
+    }
+}
+
+private fun saveRamadanCache(prefs: SharedPreferences, lat: Double, lon: Double, items: List<DayPrayerTimes>) {
+    val array = JSONArray()
+    for (item in items) {
+        val obj = JSONObject()
+            .put("dayLabel", item.dayLabel)
+            .put("dateLabel", item.dateLabel)
+            .put("sehri", item.sehri)
+            .put("iftar", item.iftar)
+        array.put(obj)
+    }
+
+    prefs.edit()
+        .putString("ramadan_cache_key", buildRamadanCacheKey(lat, lon))
+        .putLong("ramadan_cache_time", System.currentTimeMillis())
+        .putString("ramadan_cache_data", array.toString())
+        .apply()
 }
 
 fun formatToAmPm(time24h: String): String {
@@ -667,4 +798,50 @@ fun calculateNextEvent(times: List<PrayerTime>): PrayerTime? {
     val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
     val now = sdf.format(Date())
     return times.firstOrNull { it.isTomorrow || it.time > now }
+}
+
+@Composable
+private fun RamadanLoadingList() {
+    val transition = rememberInfiniteTransition(label = "ramadanLoading")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "ramadanLoadingAlpha"
+    )
+    val baseColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = alpha)
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(40.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(baseColor)
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        repeat(8) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(baseColor)
+                    .padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.weight(0.7f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(baseColor))
+                Spacer(modifier = Modifier.width(12.dp))
+                Box(modifier = Modifier.weight(1.3f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(baseColor))
+                Spacer(modifier = Modifier.width(12.dp))
+                Box(modifier = Modifier.weight(1f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(baseColor))
+                Spacer(modifier = Modifier.width(12.dp))
+                Box(modifier = Modifier.weight(1f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(baseColor))
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+    }
 }
