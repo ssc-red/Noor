@@ -26,14 +26,14 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.glance.unit.ColorProvider
-import com.example.noor.ui.theme.DeepGreen
-import com.example.noor.ui.theme.PureWhite
-import com.example.noor.ui.theme.DeepRed
 import com.example.noor.ui.theme.DarkBg
+import com.example.noor.ui.theme.DarkGrey
 import com.example.noor.ui.theme.DarkSurface
 import com.example.noor.ui.theme.LightBg
 import com.example.noor.ui.theme.LightSurface
-import com.example.noor.ui.theme.DarkGrey
+import com.example.noor.ui.theme.NoorGreen
+import com.example.noor.ui.theme.NoorRed
+import com.example.noor.ui.theme.PureWhite
 
 class NoorWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
@@ -59,8 +59,8 @@ class NoorWidget : GlanceAppWidget() {
         val bgColor = if (isDarkMode) DarkBg else LightBg
         val cardColor = if (isDarkMode) DarkSurface else LightSurface
         val textColor = if (isDarkMode) PureWhite else DarkGrey
-        val accentColor = DeepRed
-        val labelColor = if (isDarkMode) DeepGreen else DeepGreen
+        val accentColor = NoorRed
+        val labelColor = NoorGreen
 
         Column(
             modifier = GlanceModifier

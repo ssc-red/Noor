@@ -2,14 +2,11 @@ package com.example.noor.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Modern Green Palette
-val DeepGreen = Color(0xFF10B981)
-val ForestGreen = Color(0xFF059669)
-val MintGreen = Color(0xFFD1FAE5)
-
-// Modern Red/Orange Palette
-val DeepRed = Color(0xFFEF4444)
-val LightRed = Color(0xFFFEE2E2)
+// Logo palette
+val NoorGreen = Color(0xFF0E6F42)
+val NoorRed = Color(0xFFBB3827)
+val NoorGreenContainer = Color(0xFFA7D7C0)
+val NoorRedContainer = Color(0xFFE8B5AC)
 
 // Dark Mode Backgrounds
 val DarkBg = Color(0xFF0F172A)
